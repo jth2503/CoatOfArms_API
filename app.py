@@ -123,7 +123,18 @@ def addTermRelationship():
 
     return ("", 204)
 
-@app.route("/terms/removeTermRelationship", methods=[])
+@app.route("/terms/removeTermRelationship", methods=["GET"])
+def removeTermRelationship():
+    parent = request.args["parent"]
+    child = request.args["child"]
+
+    db = get_db()
+    result = db.write_transaction(lambda tx : tx.run("MATCH (parent:Term)-[r:NEXT_TERM]->(child:Term) "
+                                                    "WHERE parent.uuid = $parent AND child.uuid = $child "
+                                                    "DELETE r ",
+                                                    {"parent": parent, "child": child}))
+    
+    return ("", 204)
 
 @app.route("/terms/deleteTerm", methods=["GET"])
 def deleteTerm():
