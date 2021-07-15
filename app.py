@@ -203,6 +203,21 @@ def upsertCoA():
 
     return jsonify(result["UUID"])
 
+@app.route("/coa/deleteCoA", methods=["GET"])
+def deleteCoA():
+    coa = request.args["termUUID"]
+
+    db = get_db()
+    if coa != "":
+        db.write_transaction(lambda tx : tx.run("MATCH (coa:CoA) "
+                                                    "WHERE coa.uuid = $coa "
+                                                    "MATCH (chain:Chain)<-[:HAS_CHAIN]-(coa) "
+                                                    "DETACH DELETE chain "
+                                                    "DETACH DELETE coa ",
+                                                    {"coa": coa}))
+    
+    return ("", 204)
+
 
 @app.route("/chain/insertChains", methods=["POST"])
 def insertChains():
@@ -251,8 +266,11 @@ def deleteChains():
                                                     "FOREACH (c IN remainingChains | SET c.order = apoc.coll.indexOf(remainingChains, c)) "
                                                     "RETURN NumberDeleted",
                                                     {"coa": coa, "chains": chains}).single())
-
-    return jsonify(result["NumberDeleted"])
+    
+    if not result is None:
+        return jsonify(result["NumberDeleted"])
+    else:
+        return jsonify(0)
 
 
 if __name__ == '__main__':
