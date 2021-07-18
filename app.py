@@ -273,6 +273,58 @@ def deleteChains():
         return jsonify(0)
 
 
+
+
+def serialize_term (term):
+    return {
+        'uuid': term['uuid'],
+        'name': term['name'],
+        'synonyms': term['synonyms'],
+        'hide': term['hide'],
+        'comment': term['comment'],
+        'children': [],
+        'parents': []
+    }
+
+
+@app.route("/termeditor/firstTerms", methods=["GET"])
+def firstTerms():
+    db = get_db()
+
+    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (start:Term)-[:NEXT_TERM]->(child:Term)-[:NEXT_TERM]->(grandchild:Term) "
+                                                        "WHERE NOT (:Term)-[:NEXT_TERM]->(start) "
+                                                        "MATCH (parent:Term)-[:NEXT_TERM]->(child) "
+                                                        "RETURN start, child, collect(DISTINCT grandchild) AS grandchildren, collect(DISTINCT parent) AS parents "
+                                                        "ORDER BY start.name")))
+    
+    currentStart = None
+    resultList = []
+    newRecord = None
+
+    for record in queryResult:
+        recordStart = record['start']['uuid']
+        
+        if recordStart != currentStart:
+            if newRecord != None:
+                resultList.append(newRecord)
+            currentStart = recordStart
+            newRecord = serialize_term(record['start'])
+            newChildRecord = serialize_term(record['child'])
+            newChildRecord['children'] = [serialize_term(grandchild) for grandchild in record['grandchildren']]
+            newChildRecord['parents'] = [serialize_term(parent) for parent in record['parents']]
+            newRecord['children'].append(newChildRecord)
+        else:
+            newChildRecord = serialize_term(record['child'])
+            newChildRecord['children'] = [serialize_term(grandchild) for grandchild in record['grandchildren']]
+            newChildRecord['parents'] = [serialize_term(parent) for parent in record['parents']]
+            newRecord['children'].append(newChildRecord)
+    
+    resultList.append(newRecord)
+        
+    return jsonify(resultList)
+
+
+
 if __name__ == '__main__':
     logging.info('Running on port %d, database is at %s', port, url)
     app.run(port=port)
