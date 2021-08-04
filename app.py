@@ -4,9 +4,11 @@ import logging
 import re
 
 from flask import Flask, g, Response, request, jsonify
+from flask_cors import CORS
 from neo4j import GraphDatabase, basic_auth
 
 app = Flask(__name__, static_url_path='/static/')
+CORS(app)
 
 url = os.getenv("NEO4J_URI", "bolt://localhost:7687")
 username = os.getenv("NEO4J_USER", "neo4j")
@@ -131,10 +133,12 @@ def removeTermRelationship():
     db = get_db()
     result = db.write_transaction(lambda tx : tx.run("MATCH (parent:Term)-[r:NEXT_TERM]->(child:Term) "
                                                     "WHERE parent.uuid = $parent AND child.uuid = $child "
-                                                    "DELETE r ",
-                                                    {"parent": parent, "child": child}))
+                                                    "AND NOT (parent)<-[:CONTAINS_TERM]-(:Chain)-[:CONTAINS_TERM]->(child) "
+                                                    "DELETE r "
+                                                    "RETURN count(r) AS NumberDeleted",
+                                                    {"parent": parent, "child": child}).single())
     
-    return ("", 204)
+    return (jsonify(result["NumberDeleted"]))
 
 @app.route("/terms/deleteTerm", methods=["GET"])
 def deleteTerm():
@@ -153,8 +157,11 @@ def deleteTerm():
                                                     "RETURN value.numberChains AS Chains, value.numberTerms AS Terms",
                                                     {"termUUID": termUUID}).single())
     
-    resultDict = {"Chains": result["Chains"], "Terms": result["Terms"]}
-    return jsonify(resultDict)
+    if result != None:
+        resultDict = {"Chains": result["Chains"], "Terms": result["Terms"]}
+        return jsonify(resultDict)
+    else:
+        return ("Begriff existiert nicht", 400)
 
 
 @app.route("/coa/upsertCoA", methods=["POST"])
@@ -291,37 +298,56 @@ def serialize_term (term):
 def firstTerms():
     db = get_db()
 
-    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (start:Term)-[:NEXT_TERM]->(child:Term)-[:NEXT_TERM]->(grandchild:Term) "
+    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (start:Term) "
                                                         "WHERE NOT (:Term)-[:NEXT_TERM]->(start) "
-                                                        "MATCH (parent:Term)-[:NEXT_TERM]->(child) "
-                                                        "RETURN start, child, collect(DISTINCT grandchild) AS grandchildren, collect(DISTINCT parent) AS parents "
+                                                        "OPTIONAL MATCH (start)-[:NEXT_TERM]->(child:Term) "
+                                                        "RETURN start, collect(child) AS children "
                                                         "ORDER BY start.name")))
     
-    currentStart = None
     resultList = []
     newRecord = None
 
     for record in queryResult:
-        recordStart = record['start']['uuid']
-        
-        if recordStart != currentStart:
-            if newRecord != None:
-                resultList.append(newRecord)
-            currentStart = recordStart
-            newRecord = serialize_term(record['start'])
-            newChildRecord = serialize_term(record['child'])
-            newChildRecord['children'] = [serialize_term(grandchild) for grandchild in record['grandchildren']]
-            newChildRecord['parents'] = [serialize_term(parent) for parent in record['parents']]
-            newRecord['children'].append(newChildRecord)
-        else:
-            newChildRecord = serialize_term(record['child'])
-            newChildRecord['children'] = [serialize_term(grandchild) for grandchild in record['grandchildren']]
-            newChildRecord['parents'] = [serialize_term(parent) for parent in record['parents']]
-            newRecord['children'].append(newChildRecord)
-    
-    resultList.append(newRecord)
+        newRecord = serialize_term(record["start"])
+        newRecord["children"] = [serialize_term(child) for child in record["children"]]
+        resultList.append(newRecord)
         
     return jsonify(resultList)
+
+
+@app.route("/termeditor/updateListsOfClicked", methods=["GET"])
+def updateListsOfClicked():
+    uuid = request.args["uuid"]
+    mode = int(request.args["mode"])
+    db = get_db()
+
+    queryResult = None
+    if mode == 1:
+        queryResult = db.read_transaction(lambda tx : tx.run("MATCH (clicked:Term) "
+                                                                "WHERE clicked.uuid = $uuid "
+                                                                "OPTIONAL MATCH (clicked)-[:NEXT_TERM]->(childOfClicked:Term) "
+                                                                "RETURN collect(childOfClicked) AS newItems ",                                                           
+                                                                {"uuid": uuid}).single())
+    elif mode == 0:
+        queryResult = db.read_transaction(lambda tx : tx.run("MATCH (clicked:Term) "
+                                                                "WHERE clicked.uuid = $uuid "
+                                                                "OPTIONAL MATCH (parentOfClicked:Term)-[:NEXT_TERM]->(clicked) "
+                                                                "RETURN collect(parentOfClicked) AS newItems",                                                           
+                                                                {"uuid": uuid}).single())
+    else:
+        return ("Request misses mode", 400)                                                           
+    
+    return jsonify([serialize_term(newItem) for newItem in queryResult["newItems"]])
+
+
+@app.route("/termeditor/allTerms", methods=["GET"])
+def allTerms():
+    db = get_db()
+    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (term:Term) "
+                                                            "RETURN term "
+                                                            "ORDER BY term.name")))
+    
+    return jsonify([serialize_term(term["term"]) for term in queryResult])
 
 
 
