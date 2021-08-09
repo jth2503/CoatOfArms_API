@@ -350,6 +350,54 @@ def allTerms():
     return jsonify([serialize_term(term["term"]) for term in queryResult])
 
 
+def serialize_coa (coa):
+    return {
+        'uuid': coa['uuid'],
+        'name': coa['name'],
+        'description': coa['description'],
+        'location': coa['location'],
+        'containedChains': []
+    }
+
+def serialize_chain (chain):
+    return {
+        'uuid': chain['uuid'],
+        'containedTerms': []
+    }
+
+@app.route("/coaeditor/allCoA", methods=["GET"])
+def allCoA():
+    db = get_db()
+
+    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA)-[hc:HAS_CHAIN]->(chain:Chain) "
+                                                                "WITH coa, chain ORDER BY hc.order "
+                                                                "WITH coa, collect(chain) AS chains "
+                                                                "UNWIND chains AS chain "
+                                                                "OPTIONAL MATCH (chain)-[ct:CONTAINS_TERM]->(term:Term) "
+                                                                "WITH coa, chain, term ORDER BY ct.order "
+                                                                "WITH coa, chain{.*, terms: collect(term)} "
+                                                                "return coa, collect(chain) AS chains")))
+    
+    resultList = []   
+
+    for resultRecord in queryResult:
+        newRecord = serialize_coa(resultRecord["coa"])
+        for indexChain, chain in enumerate(resultRecord["chains"]):         
+            newChain = serialize_chain({"uuid": chain["uuid"]})
+            newChain["containedTerms"] = [{"position": indexTerm, "term": serialize_term(term)} for indexTerm, term in enumerate(chain["terms"])]
+            newRecord["containedChains"].append({"position": indexChain, "chain": newChain})
+        resultList.append(newRecord)
+
+    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA) "
+                                                                "WHERE NOT (coa)-[:HAS_CHAIN]->(:Chain) "
+                                                                "RETURN coa")))
+    for resultRecord in queryResult:
+        newRecord = serialize_coa(resultRecord["coa"])
+        resultList.append(newRecord)
+        
+    return jsonify(resultList)
+
+
 
 if __name__ == '__main__':
     logging.info('Running on port %d, database is at %s', port, url)
