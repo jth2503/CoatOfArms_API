@@ -167,48 +167,56 @@ def deleteTerm():
 @app.route("/coa/upsertCoA", methods=["POST"])
 def upsertCoA():
     uuid = request.json["uuid"]
-    location = request.json["location"]
-    coa = request.json["coa"]
+    data = request.json["data"]
+    chains = request.json["chains"]
+
+    parsedChains = []
+    for indexChain, chain in enumerate(chains): 
+        newTerms = []     
+        for indexTerm, term in enumerate(chain['containedTerms']):
+            newTerms.append({'index': indexTerm, 'term': term})
+        parsedChains.append({'index': indexChain, 'uuid': chain['uuid'], 'containedTerms': newTerms})
 
     db = get_db()
     result = ""
 
     if uuid == "":
-        result = db.write_transaction(lambda tx : tx.run("OPTIONAL MATCH (loc:Location) "
-                                                    "WHERE loc.uuid = $location "
-                                                    "CREATE (coa:CoA {uuid: randomUUID()}) "
+        result = db.write_transaction(lambda tx : tx.run("CREATE (coa:CoA {uuid: randomUUID()}) "
                                                     "SET coa += $attributes "
-                                                    "WITH coa, loc "
-                                                    "CALL apoc.do.when("
-                                                    "   loc IS NOT NULL,"
-                                                    "   'CREATE (coa)-[:AT_LOCATION]->(loc) RETURN coa',"
-                                                    "   '',"
-                                                    "   {coa: coa, loc: loc}"
-                                                    "   ) YIELD value "
-                                                    "RETURN value.coa.uuid AS UUID ",
-                                                    {"location": location, "attributes": coa}).single())
+                                                    "WITH coa "
+                                                    "UNWIND $chains AS chain "
+                                                    "CREATE (coa)-[:HAS_CHAIN {order: chain.index}]->(ch:Chain {uuid: randomUUID()}) "
+                                                    "WITH coa, chain, ch "
+                                                    "UNWIND chain.containedTerms AS term "
+                                                    "MATCH (t:Term) "
+                                                    "WHERE t.uuid = term.term "
+                                                    "CREATE (ch)-[:CONTAINS_TERM {order:term.index}]->(t) "
+                                                    "RETURN DISTINCT coa.UUID AS UUID ",
+                                                    {"attributes": data, "chains": parsedChains}).single())
     else:
         result = db.write_transaction(lambda tx : tx.run("MATCH (coa:CoA) "
                                                     "WHERE coa.uuid = $uuid "
-                                                    "OPTIONAL MATCH (loc:Location) "
-                                                    "WHERE loc.uuid = $location "
-                                                    "OPTIONAL MATCH (coa)-[r:AT_LOCATION]->(old:Location) "
                                                     "SET coa += $attributes "
-                                                    "WITH coa, loc, r, old "
-                                                    "CALL apoc.do.case(["
-                                                    "   (r IS NULL OR old IS NULL) AND loc IS NOT NULL,"
-                                                    "   'CREATE (coa)-[:AT_LOCATION]->(loc) RETURN coa',"
-                                                    "   r IS NOT NULL AND old IS NOT NULL AND loc is NULL,"
-                                                    "   'DELETE r RETURN coa',"
-                                                    "   loc.uuid <> old.uuid,"
-                                                    "   'DELETE r CREATE (coa)-[:AT_LOCATION]->(loc) RETURN coa'],"
-                                                    "   'RETURN coa',"
-                                                    "   {coa: coa, loc: loc, r: r, old: old}"
-                                                    "   ) YIELD value "
-                                                    "RETURN value.coa.uuid AS UUID",
-                                                    {"uuid": uuid, "location": location, "attributes": coa}).single())
+                                                    "WITH coa "
+                                                    "UNWIND $chains AS chain "
+                                                    "MERGE (coa)-[hcRel:HAS_CHAIN]->(ch:Chain {uuid: chain.uuid}) "
+                                                    "ON CREATE "
+                                                        "SET ch.uuid = randomUUID() "
+                                                    "SET hcRel.order = chain.index "
+                                                    "WITH coa, chain, ch "
+                                                    "UNWIND chain.containedTerms AS term "
+                                                    "MATCH (t:Term) "
+                                                    "WHERE t.uuid = term.term "
+                                                    "MERGE (ch)-[ctRel:CONTAINS_TERM]->(t) "
+                                                    "SET ctRel.order = term.index "
+                                                    "WITH coa, collect(ch.uuid) AS chainUUIDs "
+                                                    "MATCH (coa)-[:HAS_CHAIN]->(oldChain:Chain) "
+                                                    "WHERE NOT oldChain.uuid IN chainUUIDs "
+                                                    "DETACH DELETE oldChain "
+                                                    "RETURN DISTINCT coa.uuid AS UUID",
+                                                    {"uuid": uuid, "chains": parsedChains, "attributes": data}).single())
 
-    return jsonify(result["UUID"])
+    return jsonify("SUCCESS", 200)  
 
 @app.route("/coa/deleteCoA", methods=["GET"])
 def deleteCoA():
@@ -382,10 +390,10 @@ def allCoA():
 
     for resultRecord in queryResult:
         newRecord = serialize_coa(resultRecord["coa"])
-        for indexChain, chain in enumerate(resultRecord["chains"]):         
+        for chain in resultRecord["chains"]:         
             newChain = serialize_chain({"uuid": chain["uuid"]})
-            newChain["containedTerms"] = [{"position": indexTerm, "term": serialize_term(term)} for indexTerm, term in enumerate(chain["terms"])]
-            newRecord["containedChains"].append({"position": indexChain, "chain": newChain})
+            newChain["containedTerms"] = [serialize_term(term) for term in chain["terms"]]
+            newRecord["containedChains"].append(newChain)
         resultList.append(newRecord)
 
     queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA) "
