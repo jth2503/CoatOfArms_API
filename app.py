@@ -373,21 +373,33 @@ def serialize_chain (chain):
         'containedTerms': []
     }
 
-@app.route("/coaeditor/allCoA", methods=["GET"])
+@app.route("/coaeditor/allCoA", methods=["GET", "POST"])
 def allCoA():
     db = get_db()
 
-    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA)-[hc:HAS_CHAIN]->(chain:Chain) "
-                                                                "WITH coa, chain ORDER BY hc.order "
-                                                                "WITH coa, collect(chain) AS chains "
-                                                                "UNWIND chains AS chain "
-                                                                "OPTIONAL MATCH (chain)-[ct:CONTAINS_TERM]->(term:Term) "
-                                                                "WITH coa, chain, term ORDER BY ct.order "
-                                                                "WITH coa, chain{.*, terms: collect(term)} "
-                                                                "return coa, collect(chain) AS chains")))
-    
-    resultList = []   
+    if request.method == "POST":
+        coaUUIDs = request.json["coaUUIDList"]        
+        queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA)-[hc:HAS_CHAIN]->(chain:Chain) "
+                                                                    "WHERE coa.uuid IN $coaUUIDs "
+                                                                    "WITH coa, chain ORDER BY hc.order "
+                                                                    "WITH coa, collect(chain) AS chains "
+                                                                    "UNWIND chains AS chain "
+                                                                    "OPTIONAL MATCH (chain)-[ct:CONTAINS_TERM]->(term:Term) "
+                                                                    "WITH coa, chain, term ORDER BY ct.order "
+                                                                    "WITH coa, chain{.*, terms: collect(term)} "
+                                                                    "return coa, collect(chain) AS chains",
+                                                                    {"coaUUIDs": coaUUIDs})))
+    else:
+        queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA)-[hc:HAS_CHAIN]->(chain:Chain) "
+                                                                    "WITH coa, chain ORDER BY hc.order "
+                                                                    "WITH coa, collect(chain) AS chains "
+                                                                    "UNWIND chains AS chain "
+                                                                    "OPTIONAL MATCH (chain)-[ct:CONTAINS_TERM]->(term:Term) "
+                                                                    "WITH coa, chain, term ORDER BY ct.order "
+                                                                    "WITH coa, chain{.*, terms: collect(term)} "
+                                                                    "return coa, collect(chain) AS chains")))
 
+    resultList = []   
     for resultRecord in queryResult:
         newRecord = serialize_coa(resultRecord["coa"])
         for chain in resultRecord["chains"]:         
@@ -396,13 +408,73 @@ def allCoA():
             newRecord["containedChains"].append(newChain)
         resultList.append(newRecord)
 
-    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA) "
-                                                                "WHERE NOT (coa)-[:HAS_CHAIN]->(:Chain) "
-                                                                "RETURN coa")))
+    if request.method == "POST":
+        coaUUIDs = request.json["coaUUIDList"]    
+        queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA) "
+                                                                    "WHERE coa.uuid IN $coaUUIDs "
+                                                                    "AND NOT (coa)-[:HAS_CHAIN]->(:Chain) "
+                                                                    "RETURN coa",
+                                                                    {"coaUUIDs": coaUUIDs})))
+    else:
+        queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA) "
+                                                                    "WHERE NOT (coa)-[:HAS_CHAIN]->(:Chain) "
+                                                                    "RETURN coa")))
+
     for resultRecord in queryResult:
         newRecord = serialize_coa(resultRecord["coa"])
         resultList.append(newRecord)
         
+    return jsonify(resultList)
+
+
+@app.route("/research", methods=["POST"])
+def research():
+    name = request.json["name"].lower()
+    location = request.json["location"].lower()
+    singleTerms = [s.lower() for s in request.json["singleTerms"]]
+    termUUIDs = request.json["termUUIDs"]
+
+    db = get_db()
+
+    # for every user-specified list of terms from the request this query returns a list with all the chains containing the given list
+    queryResult = db.read_transaction(lambda tx : list(tx.run("UNWIND $termUUIDs AS chain "
+                                                                "CALL { "
+                                                                "   WITH chain "
+                                                                "   MATCH (t:Term) "
+                                                                "   WHERE t.uuid IN chain "
+                                                                "   RETURN collect(t) AS terms "
+                                                                "} "
+                                                                "MATCH (ch:Chain) "
+                                                                "WHERE ALL(term IN terms WHERE (ch)-[:CONTAINS_TERM]->(term)) "
+                                                                "RETURN chain, collect(ch.uuid) AS UUIDs",
+                                                                {"termUUIDs": termUUIDs})))
+    # each added record is a list of chain uuids that contain one of the requested list of terms
+    chainsContainingSpecifiedTerms = []
+    for resultRecord in queryResult:
+        chainsContainingSpecifiedTerms.append(resultRecord["UUIDs"])
+       
+    queryResult = db.read_transaction(lambda tx : list(tx.run("MATCH (coa:CoA) "
+                                                                "WHERE toLower(coa.name) CONTAINS $name "
+                                                                "AND toLower(coa.location) CONTAINS $location "
+                                                                "AND ALL(chainList IN $chainListsToSatisfy WHERE ANY(chain IN chainList WHERE (coa)-[:HAS_CHAIN]->(:Chain {uuid: chain}))) "
+                                                                "CALL apoc.when( "
+                                                                "   $singleTerms = [''], "
+                                                                "   'RETURN DISTINCT coa', "
+                                                                "   'MATCH (coa)-[:HAS_CHAIN]->(:Chain)-[:CONTAINS_TERM]->(t:Term) "
+                                                                "   WHERE ANY(term in $singleTerms WHERE toLower(t.name) CONTAINS term) "
+                                                                "   RETURN DISTINCT coa', "
+                                                                "   {coa: coa, singleTerms: $singleTerms}"
+                                                                ") YIELD value "
+                                                                "RETURN value.coa.uuid AS UUID",
+                                                                {"name": name, "location": location, "singleTerms": singleTerms, "chainListsToSatisfy": chainsContainingSpecifiedTerms})))
+
+    resultList = []
+    # for resultRecord in queryResult:
+    #     newRecord = serialize_coa(resultRecord["COA"])
+    #     resultList.append(newRecord)
+    for resultRecord in queryResult:
+        resultList.append(resultRecord["UUID"])
+    
     return jsonify(resultList)
 
 
